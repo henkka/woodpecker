@@ -51,6 +51,16 @@ func TestNewSecretsReplacer(t *testing.T) {
 		log:     "start log\ndone\nnow\nan\nmulti line secret!! ;)\nwith\ntwo\n\nnewlines",
 		secrets: []string{"an\nmulti line secret!!", "two\n\nnewlines"},
 		expect:  "start log\ndone\nnow\n********\n******** ;)\nwith\n********\n\n********",
+	}, {
+		name:    "structural characters not replaced",
+		log:     `Config: { "key": "value" }`,
+		secrets: []string{"{\n\"password\": \"secret\"\n}"},
+		expect:  `Config: { "key": "value" }`,
+	}, {
+		name:    "JSON secret content replaced but structure preserved",
+		log:     `{ "api": "secret123"`,
+		secrets: []string{"{\n\"api\": \"secret123\"\n}"},
+		expect:  `{ ********`,
 	}}
 
 	for _, c := range tc {

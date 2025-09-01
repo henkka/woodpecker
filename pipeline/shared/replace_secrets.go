@@ -35,7 +35,8 @@ func NewSecretsReplacer(secrets []string) *strings.Replacer {
 		}
 		// since replacer is executed on each line we have to split multi-line-secrets
 		for _, part := range strings.Split(old, "\n") {
-			if len(part) == 0 {
+			part = strings.TrimSpace(part)
+			if len(part) == 0 || isStructuralElement(part) {
 				continue
 			}
 			oldNew = append(oldNew, part)
@@ -44,4 +45,15 @@ func NewSecretsReplacer(secrets []string) *strings.Replacer {
 	}
 
 	return strings.NewReplacer(oldNew...)
+}
+
+// isStructuralElement checks if a line is likely a structural element
+// rather than actual secret content
+func isStructuralElement(line string) bool {
+	switch strings.TrimSpace(line) {
+	case "{", "}", "[", "]":
+		return true
+	default:
+		return false
+	}
 }
