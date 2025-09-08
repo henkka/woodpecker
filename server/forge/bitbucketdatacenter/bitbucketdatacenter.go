@@ -638,9 +638,65 @@ func (*client) TeamPerm(_ *model.User, _ string) (*model.Perm, error) {
 
 // OrgMembership returns if user is member of organization and if user
 // is admin/owner in this organization.
-func (c *client) OrgMembership(_ context.Context, _ *model.User, _ string) (*model.OrgPerm, error) {
-	// TODO: Not implemented currently
-	return nil, nil
+func (c *client) OrgMembership(ctx context.Context, u *model.User, org string) (*model.OrgPerm, error) {
+	bc, err := c.newClient(ctx, u)
+	if err != nil {
+		return nil, fmt.Errorf("unable to create bitbucket client: %w", err)
+	}
+
+	// Check if the user is Bitbucket project admin
+	if c.hasProjectAdminAccess(ctx, bc, org) {
+		return &model.OrgPerm{Member: true, Admin: true}, nil
+	}
+
+	// User is not Bitbucket project admin, check if they have write access to any repositories in the Bitbucket project.
+	// If they have, they are considered to be an organization member.
+	hasMembership, err := c.hasRepositoryWriteAccess(ctx, org, bc)
+	if err != nil {
+		return nil, fmt.Errorf("failed to check repository access: %w", err)
+	}
+
+	if hasMembership {
+		return &model.OrgPerm{Member: true, Admin: false}, nil
+	}
+
+	return &model.OrgPerm{Member: false, Admin: false}, nil
+}
+
+func (c *client) hasProjectAdminAccess(ctx context.Context, client *bb.Client, org string) bool {
+	// If the user can access project permissions, the user has project admin access in the Bitbucket
+	perms, _, err := client.Projects.SearchProjectPermissions(ctx, org, &bb.ProjectPermissionSearchOptions{})
+	if err == nil && len(perms) > 0 {
+		return true
+	}
+	return false
+}
+
+func (c *client) hasRepositoryWriteAccess(ctx context.Context, org string, client *bb.Client) (bool, error) {
+	opts := &bb.RepositorySearchOptions{
+		Archived:   "ACTIVE",
+		ProjectKey: org,
+		Permission: bb.PermissionRepoWrite,
+	}
+
+	for {
+		repos, resp, err := client.Projects.SearchRepositories(ctx, opts)
+		if err != nil {
+			return false, fmt.Errorf("failed to search repositories: %w", err)
+		}
+
+		// If we find any repositories with write access, user has membership
+		if len(repos) > 0 {
+			return true, nil
+		}
+
+		if resp.LastPage {
+			break
+		}
+		opts.Start = resp.NextPageStart
+	}
+
+	return false, nil
 }
 
 // Org fetches the organization from the forge by name. If the name is a user an org with type user is returned.
@@ -670,7 +726,7 @@ func (c *client) newOAuth2Config() *oauth2.Config {
 			AuthURL:  fmt.Sprintf("%s/oauth2/latest/authorize", publicOAuthURL),
 			TokenURL: fmt.Sprintf("%s/oauth2/latest/token", c.urlAPI),
 		},
-		Scopes:      []string{string(bb.PermissionRepoRead), string(bb.PermissionRepoWrite), string(bb.PermissionRepoAdmin)},
+		Scopes:      []string{string(bb.PermissionRepoRead), string(bb.PermissionRepoWrite), string(bb.PermissionRepoAdmin), string(bb.PermissionProjectAdmin)},
 		RedirectURL: fmt.Sprintf("%s/authorize", server.Config.Server.OAuthHost),
 	}
 }
