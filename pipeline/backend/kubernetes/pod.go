@@ -36,6 +36,7 @@ const (
 	// This will be removed in the future.
 	StepLabelLegacy       = "step"
 	StepLabel             = "woodpecker-ci.org/step"
+	StepWorkflow          = "woodpecker-ci.org/workflow"
 	podPrefix             = "wp-"
 	defaultFSGroup  int64 = 1000
 )
