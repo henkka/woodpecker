@@ -36,11 +36,12 @@ const (
 	// This will be removed in the future.
 	StepLabelLegacy       = "step"
 	StepLabel             = "woodpecker-ci.org/step"
+	TaskUUIDLabel         = "woodpecker-ci.org/task-uuid"
 	podPrefix             = "wp-"
 	defaultFSGroup  int64 = 1000
 )
 
-func mkPod(step *types.Step, config *config, podName, goos string, options BackendOptions) (*v1.Pod, error) {
+func mkPod(step *types.Step, config *config, podName, goos string, options BackendOptions, taskUUID string) (*v1.Pod, error) {
 	var err error
 
 	nsp := newNativeSecretsProcessor(config, options.Secrets)
@@ -49,12 +50,12 @@ func mkPod(step *types.Step, config *config, podName, goos string, options Backe
 		return nil, err
 	}
 
-	meta, err := podMeta(step, config, options, podName)
+	meta, err := podMeta(step, config, options, podName, taskUUID)
 	if err != nil {
 		return nil, err
 	}
 
-	spec, err := podSpec(step, config, options, nsp)
+	spec, err := podSpec(step, config, options, nsp, taskUUID)
 	if err != nil {
 		return nil, err
 	}
@@ -84,7 +85,7 @@ func podName(step *types.Step) (string, error) {
 	return dnsName(podPrefix + step.UUID)
 }
 
-func podMeta(step *types.Step, config *config, options BackendOptions, podName string) (meta_v1.ObjectMeta, error) {
+func podMeta(step *types.Step, config *config, options BackendOptions, podName string, taskUUID string) (meta_v1.ObjectMeta, error) {
 	var err error
 	meta := meta_v1.ObjectMeta{
 		Name:        podName,
@@ -92,7 +93,7 @@ func podMeta(step *types.Step, config *config, options BackendOptions, podName s
 		Annotations: podAnnotations(config, options),
 	}
 
-	meta.Labels, err = podLabels(step, config, options)
+	meta.Labels, err = podLabels(step, config, options, taskUUID)
 	if err != nil {
 		return meta, err
 	}
@@ -100,7 +101,7 @@ func podMeta(step *types.Step, config *config, options BackendOptions, podName s
 	return meta, nil
 }
 
-func podLabels(step *types.Step, config *config, options BackendOptions) (map[string]string, error) {
+func podLabels(step *types.Step, config *config, options BackendOptions, taskUUID string) (map[string]string, error) {
 	var err error
 	labels := make(map[string]string)
 
@@ -141,6 +142,11 @@ func podLabels(step *types.Step, config *config, options BackendOptions) (map[st
 		return labels, err
 	}
 
+	// Add the taskUUID label used for affinity rules
+	if len(taskUUID) > 0 {
+		labels[TaskUUIDLabel] = taskUUID
+	}
+
 	return labels, nil
 }
 
@@ -167,7 +173,7 @@ func podAnnotations(config *config, options BackendOptions) map[string]string {
 	return annotations
 }
 
-func podSpec(step *types.Step, config *config, options BackendOptions, nsp nativeSecretsProcessor) (v1.PodSpec, error) {
+func podSpec(step *types.Step, config *config, options BackendOptions, nsp nativeSecretsProcessor, taskUUID string) (v1.PodSpec, error) {
 	var err error
 	spec := v1.PodSpec{
 		RestartPolicy:      v1.RestartPolicyNever,
@@ -178,6 +184,50 @@ func podSpec(step *types.Step, config *config, options BackendOptions, nsp nativ
 		NodeSelector:       nodeSelector(options.NodeSelector, config.PodNodeSelector, step.Environment["CI_SYSTEM_PLATFORM"]),
 		Tolerations:        tolerations(options.Tolerations),
 		SecurityContext:    podSecurityContext(options.SecurityContext, config.SecurityContext, step.Privileged),
+	}
+
+	// Add anti-affinity based on taskUUID to avoid mixing different tasks on the same node
+	if len(taskUUID) > 0 {
+		// Define the Pod Anti-Affinity rule to avoid placing on a node with a different taskUUID
+		podAntiAffinity := &v1.PodAntiAffinity{
+			RequiredDuringSchedulingIgnoredDuringExecution: []v1.PodAffinityTerm{
+				{
+					LabelSelector: &meta_v1.LabelSelector{
+						MatchExpressions: []meta_v1.LabelSelectorRequirement{
+							{
+								Key:      TaskUUIDLabel,
+								Operator: meta_v1.LabelSelectorOpNotIn,
+								Values:   []string{taskUUID},
+							},
+						},
+					},
+					TopologyKey: v1.LabelHostname,
+				},
+			},
+		}
+
+		// Define the Pod Affinity rule to place on the same node as other pods with the SAME taskUUID
+		podAffinity := &v1.PodAffinity{
+			RequiredDuringSchedulingIgnoredDuringExecution: []v1.PodAffinityTerm{
+				{
+					LabelSelector: &meta_v1.LabelSelector{
+						MatchExpressions: []meta_v1.LabelSelectorRequirement{
+							{
+								Key:      TaskUUIDLabel,
+								Operator: meta_v1.LabelSelectorOpIn,
+								Values:   []string{taskUUID},
+							},
+						},
+					},
+					TopologyKey: v1.LabelHostname,
+				},
+			},
+		}
+
+		spec.Affinity = &v1.Affinity{
+			PodAntiAffinity: podAntiAffinity,
+			PodAffinity:     podAffinity,
+		}
 	}
 
 	// If there are tolerations and they are allowed
@@ -598,13 +648,13 @@ func mapToEnvVars(m map[string]string) []v1.EnvVar {
 	return ev
 }
 
-func startPod(ctx context.Context, engine *kube, step *types.Step, options BackendOptions) (*v1.Pod, error) {
+func startPod(ctx context.Context, engine *kube, step *types.Step, options BackendOptions, taskUUID string) (*v1.Pod, error) {
 	podName, err := stepToPodName(step)
 	if err != nil {
 		return nil, err
 	}
 	engineConfig := engine.getConfig()
-	pod, err := mkPod(step, engineConfig, podName, engine.goos, options)
+	pod, err := mkPod(step, engineConfig, podName, engine.goos, options, taskUUID)
 	if err != nil {
 		return nil, err
 	}
